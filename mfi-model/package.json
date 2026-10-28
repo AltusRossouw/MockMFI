@@ -1,0 +1,16 @@
+{
+  "name": "mfi-model",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Synthetic-credential protocol model of DiPlay's MFi authentication layer",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "pretest": "node src/ensure-pki.js",
+    "test": "node --test",
+    "selftest": "node src/cli.js selftest",
+    "serve": "node src/cli.js serve"
+  }
+}

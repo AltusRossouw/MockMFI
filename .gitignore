@@ -1,0 +1,18 @@
+# DiPlay release APK
+DiPlay-*.apk
+
+# DiPlay source checkout
+DiPlay-main/
+
+# MockMFI model build output
+mfi-model/build/
+mfi-model/node_modules/
+mfi-model/*.log
+
+# macOS metadata
+**/.DS_Store
+
+# MockMFI build artifacts
+build/
+out/
+mfi-linux/build/

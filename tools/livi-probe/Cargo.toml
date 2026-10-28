@@ -1,0 +1,12 @@
+[package]
+name = "mfi-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Test harness only: built inside a LIVI checkout (`native/crates/mfi-probe`) so
+# it can use LIVI's own iap2-mfi crate. GPL-3.0-or-later, to match LIVI.
+[dependencies]
+iap2-mfi = { path = "../iap2-mfi", features = ["files"] }
+livi-core-proto = { path = "../livi-core-proto" }
+serde_json = { workspace = true }
