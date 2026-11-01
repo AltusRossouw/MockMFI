@@ -195,7 +195,19 @@ key removed afterwards): subject `CN=IPA_24ACBB48646F8077F7463523085B60D2`, seri
 `24ACBB48646F8077F7463523085B60D2`, leaf SHA-256 `58d50d668e5fb0a249dfcec0997019b8d28db3afcc3b6dad31ae1cf41e895a16`,
 key/certificate match confirmed by the loader.
 
-## 8. Evidence index
+## 8. HUDIY tooling
+
+```sh
+tools/dongle-mfi-profile.py <dir|blob|tar>    # directory, raw firmware blob and tar all profiled
+tools/hudiy-autobox-check.sh                  # HUDIY default config parsed; dongle absent here
+```
+
+Observed: the APK identity profiles as `CN=IPA_24ACBB48646F8077F7463523085B60D2`, Apple MFi marker
+present, key matches certificate, in all three input shapes; the HUDIY autobox check reports the
+published `0x1314:0x1520`/`0x1314:0x1521` devices and "not attached" on this host. See
+`spec/08-hudiy.md`.
+
+## 9. Evidence index
 
 | Claim | Source |
 | --- | --- |
@@ -210,7 +222,7 @@ key/certificate match confirmed by the loader.
 | Wire vectors | `spec/03`; `node src/cli.js vectors` |
 | Open questions | `spec/04` |
 
-## 9. Residual limitations
+## 10. Residual limitations
 
 - Android decompilation needs a caller-supplied JDK and `jadx-headless-mcp`; it is not part of
   REA setup and must be provided per host.

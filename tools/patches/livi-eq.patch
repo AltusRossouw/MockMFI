@@ -1,0 +1,449 @@
+diff --git a/native/crates/livi-audio/src/player.rs b/native/crates/livi-audio/src/player.rs
+index 133d059..bfffdb6 100644
+--- a/native/crates/livi-audio/src/player.rs
++++ b/native/crates/livi-audio/src/player.rs
+@@ -17,6 +17,30 @@ use std::str::FromStr;
+ use std::sync::atomic::{AtomicBool, Ordering};
+ use std::sync::{Arc, Mutex, Once};
+ 
++/// Three-band equaliser settings, applied in front of the sink.
++#[derive(Debug, Clone, Copy, PartialEq)]
++pub struct Eq {
++    pub enabled: bool,
++    pub bass_db: f64,
++    pub mid_db: f64,
++    pub treble_db: f64,
++    /// Per-band trims on top of the three coarse sliders: the only way to cut one
++    /// cabin mode without gutting its neighbours.
++    pub bands: [f64; EQ_BANDS],
++}
++
++impl Default for Eq {
++    fn default() -> Self {
++        Self {
++            enabled: false,
++            bass_db: 0.0,
++            mid_db: 0.0,
++            treble_db: 0.0,
++            bands: [0.0; EQ_BANDS],
++        }
++    }
++}
++
+ pub struct Config {
+     pub codec: Codec,
+     pub payload_type: u8,
+@@ -27,6 +51,8 @@ pub struct Config {
+     pub device: Option<String>,
+     pub label: String,
+     pub codec_data: Vec<u8>,
++    pub eq: Eq,
++    pub preamp_db: f64,
+ }
+ 
+ fn decoder_chain(codec: Codec) -> Option<&'static str> {
+@@ -74,11 +100,12 @@ pub fn pipeline_desc(cfg: &Config) -> String {
+     };
+     format!(
+         "appsrc name=src is-live=true format=time do-timestamp={stamp} ! \
+-         {head}audioconvert ! clocksync sync=true ! volume name=vol ! \
+-         audioconvert ! audioresample ! audio/x-raw,format=S16LE,rate=48000,channels=2 ! \
++         {head}audioconvert ! volume name=preamp ! {eq} ! clocksync sync=true ! \
++         volume name=vol ! audioconvert ! audioresample ! audio/x-raw,format=S16LE,rate=48000,channels=2 ! \
+          queue name=out ! {sink}",
+         stamp = cfg.codec != Codec::AacRaw,
+         sink = sink_chain(cfg),
++        eq = eq_fragment(cfg.eq),
+     )
+ }
+ 
+@@ -112,6 +139,8 @@ pub struct Player {
+     pipeline: gst::Pipeline,
+     appsrc: gst_app::AppSrc,
+     volume: gst::Element,
++    eq: gst::Element,
++    preamp: gst::Element,
+     level: gst_controller::InterpolationControlSource,
+     visualizer_enabled: Arc<AtomicBool>,
+     visualizer: Arc<Mutex<VizAcc>>,
+@@ -120,7 +149,73 @@ pub struct Player {
+     units: Mutex<UnitClock>,
+ }
+ 
++/// Linear gain from a dB value, clamped to a sane ceiling.
++pub fn preamp_gain(db: f64) -> f64 {
++    10f64.powf(db.clamp(-24.0, 18.0) / 20.0)
++}
++
++pub fn apply_preamp(element: &gst::Element, db: f64) {
++    element.set_property("volume", preamp_gain(db));
++}
++
++/// Band centres of `equalizer-10bands`: 29 Hz .. 15 kHz.
++pub const EQ_BANDS: usize = 10;
++
++/// Map the three sliders onto the ten bands: bass covers 29-119 Hz, mid 237 Hz-1.9 kHz,
++/// treble 3.8-15 kHz. Three shelves could not reach the 4-8 kHz region that matters here.
++pub fn band_gains(eq: Eq) -> [f64; EQ_BANDS] {
++    let (b, m, t) = if eq.enabled {
++        (
++            eq.bass_db.clamp(-12.0, 12.0),
++            eq.mid_db.clamp(-12.0, 12.0),
++            eq.treble_db.clamp(-12.0, 12.0),
++        )
++    } else {
++        (0.0, 0.0, 0.0)
++    };
++    let group = [b, b, b, m, m, m, m, t, t, t];
++    let mut out = [0.0; EQ_BANDS];
++    for i in 0..EQ_BANDS {
++        out[i] = (group[i] + eq.bands[i]).clamp(-24.0, 12.0);
++    }
++    out
++}
++
++/// The equalizer fragment of a launch line, gains included. Setting properties after
++/// `parse::launch` proved unreliable on this build, so the values are baked in and
++/// `apply_eq` is only used for later changes.
++pub fn eq_fragment(eq: Eq) -> String {
++    let mut text = String::from("equalizer-10bands name=eq");
++    for (index, gain) in band_gains(eq).into_iter().enumerate() {
++        text.push_str(&format!(" band{index}={gain}"));
++    }
++    text
++}
++
++pub fn apply_eq(eq_element: &gst::Element, eq: Eq) {
++    for (index, gain) in band_gains(eq).into_iter().enumerate() {
++        eq_element.set_property(&format!("band{index}"), gain);
++    }
++}
++
+ impl Player {
++    /// The equalizer element, for a caller that wants to adjust it while playing.
++    pub fn eq_element(&self) -> gst::Element {
++        self.eq.clone()
++    }
++
++    pub fn set_eq(&self, eq: Eq) {
++        apply_eq(&self.eq, eq);
++    }
++
++    pub fn set_preamp(&self, db: f64) {
++        apply_preamp(&self.preamp, db);
++    }
++
++    pub fn preamp_element(&self) -> gst::Element {
++        self.preamp.clone()
++    }
++
+     pub fn new(cfg: &Config) -> Option<Self> {
+         ensure_init();
+ 
+@@ -150,6 +245,12 @@ impl Player {
+         let caps = gst::Caps::from_str(&caps).ok()?;
+         appsrc.set_caps(Some(&caps));
+ 
++        let eq = pipeline.by_name("eq")?;
++        apply_eq(&eq, cfg.eq);
++
++        let preamp = pipeline.by_name("preamp")?;
++        apply_preamp(&preamp, cfg.preamp_db);
++
+         let volume = pipeline.by_name("vol")?;
+         let level = gst_controller::InterpolationControlSource::new();
+         level.set_mode(gst_controller::InterpolationMode::Linear);
+@@ -226,6 +327,8 @@ impl Player {
+             pipeline,
+             appsrc,
+             volume,
++            eq,
++            preamp,
+             level,
+             visualizer_enabled,
+             visualizer,
+@@ -373,6 +476,8 @@ mod tests {
+             device: None,
+             label: "music".into(),
+             codec_data: Vec::new(),
++            eq: Eq::default(),
++            preamp_db: 0.0,
+         }
+     }
+ 
+diff --git a/native/crates/livi-core-proto/src/config.rs b/native/crates/livi-core-proto/src/config.rs
+index 7dcc153..03bb785 100644
+--- a/native/crates/livi-core-proto/src/config.rs
++++ b/native/crates/livi-core-proto/src/config.rs
+@@ -120,6 +120,46 @@ pub struct Config {
+     pub audio_input_device_label: Option<String>,
+     pub visual_audio_delay_ms: u32,
+ 
++    /// Three-band equaliser in front of the audio sink. Off by default.
++    #[serde(default)]
++    pub eq_enabled: bool,
++    #[serde(default)]
++    pub eq_bass_db: f64,
++    #[serde(default)]
++    pub eq_mid_db: f64,
++    #[serde(default)]
++    pub eq_treble_db: f64,
++
++    /// Extra gain in front of the sink, because the car's amp is the real volume
++    /// control and 100 % on the head unit can still be quiet. 0 dB is neutral.
++    #[serde(default)]
++    pub preamp_db: f64,
++
++    #[serde(default)]
++    pub eq_band0_db: f64,
++    #[serde(default)]
++    pub eq_band1_db: f64,
++    #[serde(default)]
++    pub eq_band2_db: f64,
++    #[serde(default)]
++    pub eq_band3_db: f64,
++    #[serde(default)]
++    pub eq_band4_db: f64,
++    #[serde(default)]
++    pub eq_band5_db: f64,
++    #[serde(default)]
++    pub eq_band6_db: f64,
++    #[serde(default)]
++    pub eq_band7_db: f64,
++    #[serde(default)]
++    pub eq_band8_db: f64,
++    #[serde(default)]
++    pub eq_band9_db: f64,
++    /// Test signal for EQ work: "" off, "pink" pink noise. Played through the same
++    /// EQ and preamp as program audio, so a measurement includes them.
++    #[serde(default)]
++    pub test_tone: String,
++
+     pub dab_gain_auto: bool,
+     pub dab_gain_db: f64,
+     pub dab_ppm: i32,
+@@ -494,6 +534,22 @@ pub fn defaults() -> Config {
+         audio_input_device: empty(),
+         audio_input_device_label: empty(),
+         visual_audio_delay_ms: 0,
++        eq_enabled: false,
++        eq_bass_db: 0.0,
++        eq_mid_db: 0.0,
++        eq_treble_db: 0.0,
++        preamp_db: 0.0,
++        eq_band0_db: 0.0,
++        eq_band1_db: 0.0,
++        eq_band2_db: 0.0,
++        eq_band3_db: 0.0,
++        eq_band4_db: 0.0,
++        eq_band5_db: 0.0,
++        eq_band6_db: 0.0,
++        eq_band7_db: 0.0,
++        eq_band8_db: 0.0,
++        eq_band9_db: 0.0,
++        test_tone: String::new(),
+         dab_gain_auto: true,
+         dab_gain_db: 19.7,
+         dab_ppm: 0,
+diff --git a/native/crates/livi-gst-host/Cargo.toml b/native/crates/livi-gst-host/Cargo.toml
+index f67cb55..6b071e0 100644
+--- a/native/crates/livi-gst-host/Cargo.toml
++++ b/native/crates/livi-gst-host/Cargo.toml
+@@ -17,3 +17,5 @@ realfft = "3.5.1"
+ glib.workspace = true
+ glib-unix.workspace = true
+ libc.workspace = true
++serde_json.workspace = true
++gstreamer = { workspace = true, features = ["v1_24"] }
+diff --git a/native/crates/livi-gst-host/src/gst.rs b/native/crates/livi-gst-host/src/gst.rs
+index c0311b3..e81f9f9 100644
+--- a/native/crates/livi-gst-host/src/gst.rs
++++ b/native/crates/livi-gst-host/src/gst.rs
+@@ -2,6 +2,8 @@
+ // SPDX-License-Identifier: GPL-3.0-or-later
+ // Additional terms: see NOTICE
+ 
++use gstreamer as gst;
++use gst::prelude::*;
+ use livi_audio::player::uplink::{SocketTap, Uplink, UplinkConfig as UplinkPipeline};
+ use livi_audio::player::{Config as AudioPipeline, Player as AudioPipelinePlayer};
+ use livi_audio::stream::AudioSink;
+@@ -208,8 +210,11 @@ impl Outside for Gst {
+             device: cfg.device.clone(),
+             label: format!("{:?}", cfg.codec),
+             codec_data: cfg.codec_data.clone(),
++            eq: eq_from_config(),
++            preamp_db: preamp_from_config(),
+         })?;
+         player.start();
++        watch_audio(player.eq_element(), player.preamp_element());
+         Some(player)
+     }
+ 
+@@ -261,3 +266,154 @@ fn ui_planes_path(id: u32) -> Option<String> {
+         .inspect_err(|_| eprintln!("[gst-host] no UI to draw plane 0x{id:x} in"))
+         .ok()
+ }
++
++/// The equaliser settings LIVI's UI writes into config.json, read here so a
++/// slider takes effect without a protocol change.
++fn eq_from_config() -> livi_audio::player::Eq {
++    use livi_audio::player::Eq;
++    let path = std::env::var("HOME")
++        .map(|h| std::path::Path::new(&h).join(".config/LIVI/config.json"))
++        .unwrap_or_default();
++    let Ok(text) = std::fs::read_to_string(&path) else {
++        return Eq::default();
++    };
++    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
++        return Eq::default();
++    };
++    let num = |k: &str| v.get(k).and_then(|x| x.as_f64()).unwrap_or(0.0);
++    let mut bands = [0.0f64; livi_audio::player::EQ_BANDS];
++    for (i, band) in bands.iter_mut().enumerate() {
++        *band = num(&format!("eqBand{i}Db"));
++    }
++    Eq {
++        enabled: v.get("eqEnabled").and_then(|x| x.as_bool()).unwrap_or(false),
++        bass_db: num("eqBassDb"),
++        mid_db: num("eqMidDb"),
++        treble_db: num("eqTrebleDb"),
++        bands,
++    }
++}
++
++/// The preamp gain the UI writes, in dB.
++fn preamp_from_config() -> f64 {
++    let path = std::env::var("HOME")
++        .map(|h| std::path::Path::new(&h).join(".config/LIVI/config.json"))
++        .unwrap_or_default();
++    let Ok(text) = std::fs::read_to_string(&path) else {
++        return 0.0;
++    };
++    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
++        return 0.0;
++    };
++    v.get("preampDb").and_then(|x| x.as_f64()).unwrap_or(0.0)
++}
++
++/// Follow config.json while an audio stream plays, so the sliders are live.
++fn watch_audio(eq: gst::Element, preamp: gst::Element) {
++    let path = std::env::var("HOME")
++        .map(|h| std::path::Path::new(&h).join(".config/LIVI/config.json"))
++        .unwrap_or_default();
++    let stamp = |p: &std::path::Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
++    std::thread::spawn(move || {
++        let mut last = stamp(&path);
++        loop {
++            std::thread::sleep(std::time::Duration::from_secs(2));
++            let now = stamp(&path);
++            if now == last {
++                continue;
++            }
++            last = now;
++            livi_audio::player::apply_eq(&eq, eq_from_config());
++            livi_audio::player::apply_preamp(&preamp, preamp_from_config());
++        }
++    });
++}
++
++/// The test tone the Equaliser page asks for ("" none, "pink" pink noise).
++fn test_tone_from_config() -> String {
++    let path = std::env::var("HOME")
++        .map(|h| std::path::Path::new(&h).join(".config/LIVI/config.json"))
++        .unwrap_or_default();
++    let Ok(text) = std::fs::read_to_string(&path) else {
++        return String::new();
++    };
++    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
++        return String::new();
++    };
++    v.get("testTone")
++        .and_then(|x| x.as_str())
++        .unwrap_or("")
++        .to_string()
++}
++
++/// Ask gst-host to follow the test-tone setting. Call once at startup.
++pub fn start_test_tone() {
++    static ONCE: std::sync::Once = std::sync::Once::new();
++    ONCE.call_once(|| {
++        let _ = gst::init();
++        std::thread::spawn(|| {
++            let mut playing: Option<gst::Element> = None;
++            let mut last = String::new();
++            loop {
++                std::thread::sleep(std::time::Duration::from_secs(1));
++                // the tone must follow the equaliser, so a change of gains or of the
++                // on/off switch rebuilds it just like a change of the tone itself
++                let wanted = test_tone_from_config();
++                let signature = format!(
++                    "{wanted}|{:?}|{:.2}|{:.2}|{:.2}|{:.2}|{:?}",
++                    eq_from_config().enabled,
++                    eq_from_config().bass_db,
++                    eq_from_config().mid_db,
++                    eq_from_config().treble_db,
++                    preamp_from_config(),
++                    eq_from_config().bands
++                );
++                if signature == last {
++                    continue;
++                }
++                last = signature;
++
++                // stop and rebuild in the same tick, otherwise a stale pipeline can
++                // survive a tick and be what the microphone hears
++                if let Some(p) = playing.take() {
++                    let _ = p.set_state(gst::State::Null);
++                }
++                if wanted.is_empty() {
++                    continue;
++                }
++                match pipeline_eq_and_preamp(&wanted) {
++                    Some(p) => {
++                        let _ = p.set_state(gst::State::Playing);
++                        playing = Some(p);
++                    }
++                    None => eprintln!("[tone] cannot build the test tone pipeline"),
++                }
++            }
++        });
++    });
++}
++
++fn pipeline_eq_and_preamp(kind: &str) -> Option<gst::Element> {
++    let source = if kind == "sweep" {
++        "audiotestsrc is-live=true wave=sine freq=1000"
++    } else {
++        "audiotestsrc is-live=true wave=pink-noise"
++    };
++    let desc = format!(
++        "{source} ! audioconvert ! volume name=preamp volume={preamp} ! {eq} \
++         ! audioconvert ! audioresample \
++         ! audio/x-raw,format=S16LE,rate=48000,channels=2 ! pulsesink sync=false",
++        preamp = livi_audio::player::preamp_gain(preamp_from_config()),
++        eq = livi_audio::player::eq_fragment(eq_from_config()),
++    );
++    let element = gst::parse::launch(&desc).ok()?;
++    if let Ok(bin) = element.clone().downcast::<gst::Bin>() {
++        if let Some(eq) = bin.by_name("eq") {
++            livi_audio::player::apply_eq(&eq, eq_from_config());
++        }
++        if let Some(pre) = bin.by_name("preamp") {
++            livi_audio::player::apply_preamp(&pre, preamp_from_config());
++        }
++    }
++    Some(element)
++}
+diff --git a/native/crates/livi-gst-host/src/main.rs b/native/crates/livi-gst-host/src/main.rs
+index 83ca4fb..0ea9ab6 100644
+--- a/native/crates/livi-gst-host/src/main.rs
++++ b/native/crates/livi-gst-host/src/main.rs
+@@ -9,6 +9,7 @@ fn main() {
+         return;
+     }
+ 
++    livi_gst_host::gst::start_test_tone();
+     livi_gst_host::process::run(
+         args.first().map_or("", String::as_str),
+         args.get(1).map_or("", String::as_str),

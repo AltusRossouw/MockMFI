@@ -1,0 +1,413 @@
+diff --git a/native/crates/livi-i18n/locales/en.json b/native/crates/livi-i18n/locales/en.json
+index d63a77e..c4592dc 100644
+--- a/native/crates/livi-i18n/locales/en.json
++++ b/native/crates/livi-i18n/locales/en.json
+@@ -306,7 +306,26 @@
+     "dabGain": "Gain",
+     "moveUp": "Move up",
+     "moveDown": "Move down",
+-    "dabPpm": "Frequency correction"
++    "dabPpm": "Frequency correction",
++    "equalizer": "Equaliser",
++    "eqEnabled": "Enabled",
++    "eqBass": "Bass",
++    "eqMid": "Midrange",
++    "eqTreble": "Treble",
++    "preamp": "Preamp (dB)",
++    "testTone": "Test tone",
++    "toneOff": "Off",
++    "tonePink": "Pink noise",
++    "eqBand0": "29 Hz",
++    "eqBand1": "59 Hz",
++    "eqBand2": "119 Hz",
++    "eqBand3": "237 Hz",
++    "eqBand4": "474 Hz",
++    "eqBand5": "947 Hz",
++    "eqBand6": "1.9 kHz",
++    "eqBand7": "3.8 kHz",
++    "eqBand8": "7.5 kHz",
++    "eqBand9": "15 kHz"
+   },
+   "softwareUpdate": {
+     "channelNightly": "Nightly",
+diff --git a/native/crates/livi-ui-model/src/dashboard/readings.rs b/native/crates/livi-ui-model/src/dashboard/readings.rs
+index 34606f5..945c604 100644
+--- a/native/crates/livi-ui-model/src/dashboard/readings.rs
++++ b/native/crates/livi-ui-model/src/dashboard/readings.rs
+@@ -45,9 +45,16 @@ pub struct Readings {
+     pub fuel: i32,
+     pub fuel_low: bool,
+     pub battery: bool,
+-    pub oil_text: String,
+-    pub oil_ratio: f64,
+-    pub oil_hot: bool,
++    pub coolant_text: String,
++    pub coolant_ratio: f64,
++    pub coolant_hot: bool,
++    pub intake_text: String,
++    pub intake_ratio: f64,
++    pub economy_text: String,
++    pub trip_text: String,
++    pub rpm_text: String,
++    pub range_text: String,
++    pub eq_on: bool,
+ }
+ 
+ pub fn config(state: &Value) -> Config {
+@@ -72,6 +79,40 @@ pub fn gear(v: &Value) -> String {
+     }
+ }
+ 
++/// "8.4 L/100 · trip 312 km", or empty when the bridge has no consumption yet.
++/// The trip computer: distance, average consumption and the litres that implies.
++fn trip_text(t: &Value) -> String {
++    let km = num(&t["odometerTripKm"]);
++    let avg = num(&t["consumptionAvgLPer100Km"]);
++    match (km, avg) {
++        (Some(km), Some(avg)) if km >= 0.1 && avg > 0.0 => {
++            format!("TRIP {km:.0} km · {avg:.1} L/100 · {:.1} L", avg * km / 100.0)
++        }
++        (Some(km), _) if km >= 0.1 => format!("TRIP {km:.0} km"),
++        _ => String::new(),
++    }
++}
++
++fn economy_text(t: &Value) -> String {
++    let mut parts: Vec<String> = Vec::new();
++    match num(&t["consumptionLPer100Km"]) {
++        Some(c) => parts.push(format!("{c:.1} L/100")),
++        // standing still: L/100 km is meaningless, litres per hour is not
++        None => {
++            if let Some(r) = num(&t["fuelRateLph"]) {
++                parts.push(format!("{r:.1} L/h"));
++            }
++        }
++    }
++    parts.join(" · ")
++}
++
++const COOLANT_MIN_C: f64 = 40.0;
++const COOLANT_MAX_C: f64 = 120.0;
++const COOLANT_WARN_C: f64 = 105.0;
++const INTAKE_MIN_C: f64 = -10.0;
++const INTAKE_MAX_C: f64 = 60.0;
++
+ fn temperature(c: f64, unit: TemperatureUnit) -> f64 {
+     match unit {
+         TemperatureUnit::Celsius => c,
+@@ -141,9 +182,27 @@ pub fn readings(state: &Value, screen: Screen) -> Readings {
+         fuel,
+         fuel_low: fuel <= FUEL_WARN_BELOW,
+         battery: c.car_type == Some(CarType::Electric),
+-        oil_text: format!("{}°", temperature(oil, temp_unit).round()),
+-        oil_ratio: (oil_round.clamp(OIL_MIN_C, OIL_MAX_C) - OIL_MIN_C) / (OIL_MAX_C - OIL_MIN_C),
+-        oil_hot: oil_round >= OIL_WARN_C,
++        coolant_text: num(&t["coolantC"])
++            .map(|c| format!("{}{suffix}", temperature(c, temp_unit).round()))
++            .unwrap_or_else(|| "—".into()),
++        coolant_ratio: num(&t["coolantC"])
++            .map(|c| (c.clamp(COOLANT_MIN_C, COOLANT_MAX_C) - COOLANT_MIN_C) / (COOLANT_MAX_C - COOLANT_MIN_C))
++            .unwrap_or(0.0),
++        coolant_hot: num(&t["coolantC"]).is_some_and(|c| c >= COOLANT_WARN_C),
++        intake_ratio: num(&t["iatC"])
++            .map(|c| (c.clamp(INTAKE_MIN_C, INTAKE_MAX_C) - INTAKE_MIN_C) / (INTAKE_MAX_C - INTAKE_MIN_C))
++            .unwrap_or(0.0),
++        economy_text: economy_text(&t),
++        trip_text: trip_text(&t),
++        eq_on: c.eq_enabled,
++        range_text: num(&t["rangeKm"])
++            .map(|r| format!("RANGE {r:.0} km"))
++            .unwrap_or_default(),
++        // the tachometer readout, rounded to 10 rpm so the number stays readable
++        rpm_text: format!("{:.0}", (num(&t["rpm"]).unwrap_or(0.0) / 10.0).round() * 10.0),
++        intake_text: num(&t["iatC"])
++            .map(|c| format!("{}{suffix}", temperature(c, temp_unit).round()))
++            .unwrap_or_else(|| "—".into()),
+     }
+ }
+ 
+@@ -178,16 +237,21 @@ mod tests {
+         assert_eq!(r.speed_text, "62");
+         assert_eq!(r.speed_label, "MPH");
+         assert_eq!(r.ambient.as_deref(), Some("68°F"));
+-        assert_eq!(r.oil_text, "194°");
+-        assert!(!r.oil_hot);
++        assert_eq!(r.coolant_text, "—");            // the car sends no coolant here
++        assert!(!r.coolant_hot);
+     }
+ 
+     #[test]
+-    fn low_fuel_and_hot_oil_warn() {
+-        let s = state(json!({ "fuelPct": 10.4, "oilC": 130.0 }), json!({}));
++    fn low_fuel_and_hot_coolant_warn() {
++        let s = state(
++            json!({ "fuelPct": 10.4, "coolantC": 110.0, "iatC": 30.0 }),
++            json!({}),
++        );
+         let r = readings(&s, Screen::Main);
+         assert_eq!(r.fuel, 10);
+-        assert!(r.fuel_low && r.oil_hot);
++        assert!(r.fuel_low && r.coolant_hot);
++        assert_eq!(r.coolant_text, "110°C");
++        assert_eq!(r.intake_text, "30°C");
+         assert_eq!(r.gear, "P");
+     }
+ }
+diff --git a/native/crates/livi-ui-model/src/settings/schemas/audio.rs b/native/crates/livi-ui-model/src/settings/schemas/audio.rs
+index 5482c08..add6df7 100644
+--- a/native/crates/livi-ui-model/src/settings/schemas/audio.rs
++++ b/native/crates/livi-ui-model/src/settings/schemas/audio.rs
+@@ -50,6 +50,68 @@ pub fn schema() -> Node {
+                 "systemSounds",
+                 "systemSoundsVolume",
+             ),
++            Node::route(
++                "equalizer",
++                Label::new("settings.equalizer", "Equaliser"),
++                vec![
++                    Node::toggle(Label::new("settings.eqEnabled", "Enabled"), "eqEnabled"),
++                    Node::number(Label::new("settings.eqBass", "Bass"), "eqBassDb")
++                        .range(Some(-12.0), Some(12.0), Some(0.5))
++                        .page(Label::new("settings.eqBass", "Bass")),
++                    Node::number(Label::new("settings.eqMid", "Midrange"), "eqMidDb")
++                        .range(Some(-12.0), Some(12.0), Some(0.5))
++                        .page(Label::new("settings.eqMid", "Midrange")),
++                    Node::number(Label::new("settings.eqTreble", "Treble"), "eqTrebleDb")
++                        .range(Some(-12.0), Some(12.0), Some(0.5))
++                        .page(Label::new("settings.eqTreble", "Treble")),
++                    Node::number(Label::new("settings.eqBand0", "29 Hz"), "eqBand0Db")
++                        .range(Some(-24.0), Some(12.0), Some(0.5))
++                        .page(Label::new("settings.eqBand0", "29 Hz")),
++                    Node::number(Label::new("settings.eqBand1", "59 Hz"), "eqBand1Db")
++                        .range(Some(-24.0), Some(12.0), Some(0.5))
++                        .page(Label::new("settings.eqBand1", "59 Hz")),
++                    Node::number(Label::new("settings.eqBand2", "119 Hz"), "eqBand2Db")
++                        .range(Some(-24.0), Some(12.0), Some(0.5))
++                        .page(Label::new("settings.eqBand2", "119 Hz")),
++                    Node::number(Label::new("settings.eqBand3", "237 Hz"), "eqBand3Db")
++                        .range(Some(-24.0), Some(12.0), Some(0.5))
++                        .page(Label::new("settings.eqBand3", "237 Hz")),
++                    Node::number(Label::new("settings.eqBand4", "474 Hz"), "eqBand4Db")
++                        .range(Some(-24.0), Some(12.0), Some(0.5))
++                        .page(Label::new("settings.eqBand4", "474 Hz")),
++                    Node::number(Label::new("settings.eqBand5", "947 Hz"), "eqBand5Db")
++                        .range(Some(-24.0), Some(12.0), Some(0.5))
++                        .page(Label::new("settings.eqBand5", "947 Hz")),
++                    Node::number(Label::new("settings.eqBand6", "1.9 kHz"), "eqBand6Db")
++                        .range(Some(-24.0), Some(12.0), Some(0.5))
++                        .page(Label::new("settings.eqBand6", "1.9 kHz")),
++                    Node::number(Label::new("settings.eqBand7", "3.8 kHz"), "eqBand7Db")
++                        .range(Some(-24.0), Some(12.0), Some(0.5))
++                        .page(Label::new("settings.eqBand7", "3.8 kHz")),
++                    Node::number(Label::new("settings.eqBand8", "7.5 kHz"), "eqBand8Db")
++                        .range(Some(-24.0), Some(12.0), Some(0.5))
++                        .page(Label::new("settings.eqBand8", "7.5 kHz")),
++                    Node::number(Label::new("settings.eqBand9", "15 kHz"), "eqBand9Db")
++                        .range(Some(-24.0), Some(12.0), Some(0.5))
++                        .page(Label::new("settings.eqBand9", "15 kHz")),
++                    Node::number(Label::new("settings.preamp", "Preamp (dB)"), "preampDb")
++                        .range(Some(-24.0), Some(18.0), Some(0.5))
++                        .page(Label::new("settings.preamp", "Preamp (dB)")),
++                    Node::select(
++                        Label::new("settings.testTone", "Test tone"),
++                        "testTone",
++                        vec![
++                            choice(Label::new("settings.toneOff", "Off"), OptionValue::Text("")),
++                            choice(
++                                Label::new("settings.tonePink", "Pink noise"),
++                                OptionValue::Text("pink"),
++                            ),
++                        ],
++                    )
++                    .display_value(),
++                ],
++            )
++            .icon("audioOutput"),
+             Node::select(
+                 Label::new("settings.audioOutputDevice", "Audio Output"),
+                 "audioOutputDevice",
+diff --git a/native/crates/livi-ui/src/dashboard_ui.rs b/native/crates/livi-ui/src/dashboard_ui.rs
+index c8679e0..d363663 100644
+--- a/native/crates/livi-ui/src/dashboard_ui.rs
++++ b/native/crates/livi-ui/src/dashboard_ui.rs
+@@ -261,9 +261,16 @@ pub fn fill(d: &DashState<'_>, mut v: DashView) {
+     d.set_fuel(r.fuel);
+     d.set_fuel_low(r.fuel_low);
+     d.set_battery(r.battery);
+-    d.set_oil_text(r.oil_text.clone().into());
+-    d.set_oil_ratio(r.oil_ratio as f32);
+-    d.set_oil_hot(r.oil_hot);
++    d.set_coolant_text(r.coolant_text.clone().into());
++    d.set_coolant_ratio(r.coolant_ratio as f32);
++    d.set_coolant_hot(r.coolant_hot);
++    d.set_intake_text(r.intake_text.clone().into());
++    d.set_economy_text(r.economy_text.clone().into());
++    d.set_trip_text(r.trip_text.clone().into());
++    d.set_rpm_text(r.rpm_text.clone().into());
++    d.set_range_text(r.range_text.clone().into());
++    d.set_eq_on(r.eq_on);
++    d.set_intake_ratio(r.intake_ratio as f32);
+     let accent = v.accent.as_deref().and_then(hex);
+     d.set_has_accent(accent.is_some());
+     d.set_accent(accent.unwrap_or_default());
+@@ -289,6 +296,15 @@ pub fn fill(d: &DashState<'_>, mut v: DashView) {
+ }
+ 
+ pub fn wire(d: &DashState<'_>, client: &Client) {
++    d.on_eq_toggle({
++        let c = client.clone();
++        move || {
++            let current = c.state()["config"]["eqEnabled"].as_bool().unwrap_or(false);
++            c.act(Action::SetConfig {
++                patch: serde_json::json!({ "eqEnabled": !current }),
++            });
++        }
++    });
+     d.on_step({
+         let c = client.clone();
+         move |by| c.act(Action::StepClusterLayout { by })
+diff --git a/native/crates/livi-ui/ui/dashboard.slint b/native/crates/livi-ui/ui/dashboard.slint
+index 0d7defc..4fffed0 100644
+--- a/native/crates/livi-ui/ui/dashboard.slint
++++ b/native/crates/livi-ui/ui/dashboard.slint
+@@ -98,8 +98,8 @@ export component Dashboard inherits Rectangle {
+             width: 200 * root.u;
+             height: 130 * root.u;
+             u: root.u;
+-            value: DashState.gear;
+-            caption: DashState.gear-label;
++            value: DashState.rpm-text;
++            caption: "RPM";
+             to-end: false;
+             backdrop: DashState.map;
+             backdrop-color: root.plate;
+@@ -177,15 +177,89 @@ export component Dashboard inherits Rectangle {
+             color: Theme.text;
+         }
+ 
++        if DashState.trip-text != "": Text {
++            x: root.left + 640 * root.u - self.width / 2;
++            y: root.top + 48 * root.u;
++            text: DashState.trip-text;
++            font-size: 18 * root.u;
++            font-weight: 500;
++            color: Theme.text-secondary;
++        }
++        if DashState.range-text != "": Text {
++            x: root.left + 640 * root.u - self.width / 2;
++            y: root.top + 106 * root.u;
++            text: DashState.range-text;
++            font-size: 18 * root.u;
++            font-weight: 500;
++            letter-spacing: 0.4 * root.u;
++            color: Theme.text-secondary;
++        }
++        if DashState.economy-text != "": Text {
++            x: root.left + 640 * root.u - self.width / 2;
++            y: root.top + 76 * root.u;
++            text: DashState.economy-text;
++            font-size: 24 * root.u;
++            font-weight: 600;
++            color: Theme.text;
++        }
++        Text {
++            x: root.left + 140 * root.u;
++            y: root.top + 638 * root.u;
++            text: "COOLANT";
++            font-size: 14 * root.u;
++            font-weight: 600;
++            letter-spacing: 0.6 * root.u;
++            color: Theme.text-secondary;
++        }
++        Text {
++            x: root.left + 380 * root.u;
++            y: root.top + 638 * root.u;
++            text: "INTAKE";
++            font-size: 14 * root.u;
++            font-weight: 600;
++            letter-spacing: 0.6 * root.u;
++            color: Theme.text-secondary;
++        }
+         Level {
+             x: root.left + 140 * root.u;
+             y: root.top + 660 * root.u;
+             height: 24 * root.u;
+             u: root.u;
+             icon: @image-url("icons/DeviceThermostat.svg");
+-            ratio: DashState.oil-ratio;
+-            value: DashState.oil-text;
+-            warn: DashState.oil-hot;
++            ratio: DashState.coolant-ratio;
++            value: DashState.coolant-text;
++            warn: DashState.coolant-hot;
++        }
++        Level {
++            x: root.left + 380 * root.u;
++            y: root.top + 660 * root.u;
++            height: 24 * root.u;
++            u: root.u;
++            icon: @image-url("icons/ThermostatOutlined.svg");
++            ratio: DashState.intake-ratio;
++            value: DashState.intake-text;
++        }
++        Rectangle {
++            x: root.left + 1150 * root.u;
++            y: root.top + 636 * root.u;
++            width: 62 * root.u;
++            height: 30 * root.u;
++            border-radius: 8 * root.u;
++            background: DashState.eq-on ? (DashState.has-accent ? DashState.accent : Theme.text) : transparent;
++            border-width: 2 * root.u;
++            border-color: Theme.text-secondary;
++            Text {
++                text: "EQ";
++                font-size: 16 * root.u;
++                font-weight: 700;
++                letter-spacing: 0.8 * root.u;
++                color: DashState.eq-on ? Theme.background : Theme.text-secondary;
++                horizontal-alignment: center;
++                vertical-alignment: center;
++            }
++            TouchArea {
++                clicked => { DashState.eq-toggle(); }
++            }
+         }
+         Level {
+             x: root.left + 1140 * root.u - self.width;
+diff --git a/native/crates/livi-ui/ui/dashboard/state.slint b/native/crates/livi-ui/ui/dashboard/state.slint
+index 440de58..4318ba0 100644
+--- a/native/crates/livi-ui/ui/dashboard/state.slint
++++ b/native/crates/livi-ui/ui/dashboard/state.slint
+@@ -71,14 +71,21 @@ export global DashState {
+     in property <int> fuel;
+     in property <bool> fuel-low;
+     in property <bool> battery;
+-    in property <string> oil-text: "0°";
+-    in property <float> oil-ratio;
+-    in property <bool> oil-hot;
++    in property <string> coolant-text: "—";
++    in property <float> coolant-ratio;
++    in property <bool> coolant-hot;
++    in property <string> intake-text: "—";
++    in property <string> economy-text: "";
++    in property <string> trip-text: "";
++    in property <string> rpm-text: "0";
++    in property <string> range-text: "";
++    in property <float> intake-ratio;
+     in property <color> accent;
+     in property <bool> has-accent;
+     in property <int> page-count;
+     in property <int> page-index;
+     in-out property <bool> dots-shown: true;
++    in-out property <bool> eq-on: false;
+     in property <string> clock;
+     in property <bool> nav-active;
+     in property <image> nav-icon;
+@@ -94,6 +101,7 @@ export global DashState {
+     in property <string> nav-destination;
+     in property <string> nav-app;
+     in property <string> placeholder: "No dashboard on this screen";
++    callback eq-toggle();
+     callback select-page(int);
+     callback step(int);
+ }

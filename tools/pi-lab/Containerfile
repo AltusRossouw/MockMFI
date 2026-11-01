@@ -1,0 +1,8 @@
+# Script checks only: no boot, no DRM, no radios. See README.md for what a VM adds.
+FROM debian:trixie-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      bash coreutils gawk python3 curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /lab
+COPY tools/livi-pi-preflight.sh tools/livi-obd-elm327.py tools/livi-default-config.json /lab/
+CMD ["bash", "-lc", "/lab/livi-pi-preflight.sh --selftest && python3 /lab/livi-obd-elm327.py --selftest"]

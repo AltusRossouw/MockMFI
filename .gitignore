@@ -16,3 +16,7 @@ mfi-model/*.log
 build/
 out/
 mfi-linux/build/
+
+# CarPlayDesk (macOS app): SwiftPM and bundle output
+macos/.build/
+macos/CarPlayDesk.app/

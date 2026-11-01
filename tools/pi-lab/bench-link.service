@@ -1,0 +1,13 @@
+[Unit]
+Description=Bring eth0 up for the bench link (no DHCP, no NetworkManager)
+DefaultDependencies=no
+After=sysinit.target
+Before=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/sbin/ip link set eth0 up
+RemainAfterExit=yes
+
+[Install]
+WantedBy=sysinit.target
